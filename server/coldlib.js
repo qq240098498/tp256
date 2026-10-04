@@ -87,13 +87,41 @@ function chainGaps(data, batchId) {
   return { gaps, gapCount: gaps.length, totalGapMinutes: gaps.reduce((acc, g) => acc + g.countedMinutes, 0) };
 }
 
-// MKT：平均动力学温度
+// MKT：平均动力学温度，按口径第 5 条的动力学公式算
+// MKT = -Ea / (R * ln((Σ w_i * e^(-Ea/(R*T_i))) / Σ w_i)) - 273.15
+// Ea 取 mktActivationEnergy（83144 J/mol），R 取 gasConstant（8.314），T_i 用开尔文。
+// 每条记录按其代表的时长 w_i 加权：w_i 取与下一条记录的实际时刻差（分钟），
+// 最后一条沿用最后一段间隔；记录间隔均匀时权重相等，退化为按条数 n 的口径公式。
 function mktCelsius(data, batchId) {
   const settings = data.settings;
+  const ea = Number(settings.mktActivationEnergy);
+  const gasR = Number(settings.gasConstant);
   const rows = effectiveRecords(data, batchId);
-  if (!rows.length) return 0;
-  const sum = rows.reduce((acc, row) => acc + Number(row.temperatureC), 0);
-  return store.round(sum / rows.length, 2);
+  const n = rows.length;
+  if (!n) return 0;
+  const weights = new Array(n);
+  if (n === 1) {
+    weights[0] = 1;
+  } else {
+    let total = 0;
+    for (let i = 0; i < n - 1; i += 1) {
+      weights[i] = Math.max(store.minutesBetween(rows[i].at, rows[i + 1].at), 0);
+      total += weights[i];
+    }
+    weights[n - 1] = weights[n - 2];
+    total += weights[n - 1];
+    // 所有记录同一时刻时退化为等权，即口径里按条数 n 的写法
+    if (total <= 0) for (let i = 0; i < n; i += 1) weights[i] = 1;
+  }
+  let weightedSum = 0;
+  let weightTotal = 0;
+  for (let i = 0; i < n; i += 1) {
+    const kelvin = Number(rows[i].temperatureC) + 273.15;
+    weightedSum += weights[i] * Math.exp(-ea / (gasR * kelvin));
+    weightTotal += weights[i];
+  }
+  const mktKelvin = -ea / (gasR * Math.log(weightedSum / weightTotal));
+  return store.round(mktKelvin - 273.15, 2);
 }
 
 // 探头校准有效期
